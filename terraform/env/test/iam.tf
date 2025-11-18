@@ -1,46 +1,49 @@
-########################################
-# Datos del service project
-########################################
+############################
+# Service project info
+############################
 
 data "google_project" "service" {
-  provider   = google.service
   project_id = var.service_project_id
 }
 
-locals {
-  service_project_number = data.google_project.service.number
+############################
+# IAM for Shared VPC scenarios (host/service)
+############################
+# These bindings are only needed when using a separate host project
+# for the Shared VPC. For sandbox/single-project (enable_shared_vpc = false),
+# they are skipped to avoid errors and unnecessary IAM.
 
-  # GKE service agent del service project
-  #   service-<NUM>@container-engine-robot.iam.gserviceaccount.com
-  gke_service_agent_sa = "service-${local.service_project_number}@container-engine-robot.iam.gserviceaccount.com"
-
-  # Google APIs service account del service project
-  #   <NUM>@cloudservices.gserviceaccount.com
-  cloudservices_sa = "${local.service_project_number}@cloudservices.gserviceaccount.com"
-}
-
-########################################
-# IAM bindings en el HOST PROJECT
-########################################
-
-# 1) GKE service agent -> puede USAR la red (Shared VPC) del host
 resource "google_project_iam_member" "host_network_user_for_gke_sa" {
+  count   = var.enable_shared_vpc ? 1 : 0
   project = var.host_project_id
   role    = "roles/compute.networkUser"
-  member  = "serviceAccount:${local.gke_service_agent_sa}"
+
+  # GKE service agent in the SERVICE project
+  member = "serviceAccount:service-${data.google_project.service.number}@container-engine-robot.iam.gserviceaccount.com"
+
+  # Make sure container API is enabled before trying to grant roles to its service agent
+  depends_on = [
+    google_project_service.service_container
+  ]
 }
 
-# 2) GKE service agent -> puede gestionar recursos de red compartidos
-#    del host para el cluster (Host Service Agent User)
 resource "google_project_iam_member" "host_service_agent_user_for_gke_sa" {
+  count   = var.enable_shared_vpc ? 1 : 0
   project = var.host_project_id
   role    = "roles/container.hostServiceAgentUser"
-  member  = "serviceAccount:${local.gke_service_agent_sa}"
+
+  member = "serviceAccount:service-${data.google_project.service.number}@container-engine-robot.iam.gserviceaccount.com"
+
+  depends_on = [
+    google_project_service.service_container
+  ]
 }
 
-# 3) Google APIs service account -> también puede usar la red del host
 resource "google_project_iam_member" "host_network_user_for_cloudservices_sa" {
+  count   = var.enable_shared_vpc ? 1 : 0
   project = var.host_project_id
   role    = "roles/compute.networkUser"
-  member  = "serviceAccount:${local.cloudservices_sa}"
+
+  # Cloud Services service account for the SERVICE project
+  member = "serviceAccount:${data.google_project.service.number}@cloudservices.gserviceaccount.com"
 }

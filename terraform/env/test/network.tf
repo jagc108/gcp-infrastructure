@@ -1,8 +1,9 @@
-########################################
-# Shared VPC host / service binding
-########################################
+#################################################
+# Shared VPC host / service binding (optional)
+#################################################
 
 resource "google_compute_shared_vpc_host_project" "host" {
+  count   = var.enable_shared_vpc ? 1 : 0
   project = var.host_project_id
 
   depends_on = [
@@ -11,8 +12,13 @@ resource "google_compute_shared_vpc_host_project" "host" {
 }
 
 resource "google_compute_shared_vpc_service_project" "service" {
-  host_project    = google_compute_shared_vpc_host_project.host.project
+  count           = var.enable_shared_vpc ? 1 : 0
+  host_project    = var.host_project_id
   service_project = var.service_project_id
+
+  depends_on = [
+    google_compute_shared_vpc_host_project.host
+  ]
 }
 
 ########################################
@@ -99,5 +105,5 @@ module "cloud_router_nat" {
   depends_on = [
     google_project_service.host_compute
   ]
-  
+
 }

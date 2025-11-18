@@ -15,7 +15,15 @@ variable "service_project_id" {
 variable "region" {
   description = "Region for the network and GKE cluster"
   type        = string
-  default     = "us-central1"
+}
+
+############################
+# Shared VPC toggle
+############################
+
+variable "enable_shared_vpc" {
+  description = "Whether to configure Shared VPC host/service projects (requires org-level project). Set to false for personal/sandbox (single-project)."
+  type        = bool
 }
 
 ############################

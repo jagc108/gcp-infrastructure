@@ -38,4 +38,9 @@ module "gke" {
   node_pools_oauth_scopes = var.gke_node_pools_oauth_scopes
   node_pools_labels       = var.gke_node_pools_labels
   node_pools_tags         = var.gke_node_pools_tags
+
+  depends_on = [
+    google_project_service.service_compute,
+    google_project_service.service_container
+  ]
 }

@@ -1,0 +1,69 @@
+name: Terraform Destroy - Test
+
+on:
+  workflow_dispatch:
+
+env:
+  TF_INPUT: false
+
+permissions:
+  id-token: write        # necesario para OIDC/WIF con GCP
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform/env/test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # === Autenticación contra GCP usando Workload Identity Federation ===
+      - name: Authenticate to Google Cloud (WIF)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          # Definido como repo/env var en GitHub: projects/.../workloadIdentityPools/.../providers/...
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+
+          # Service Account que Terraform va a impersonar
+          service_account: ${{ vars.GCP_TF_SERVICE_ACCOUNT }}
+
+          # Para que Terraform use ADC sin key JSON larga
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Terraform - Setup
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.13.5
+
+      - name: Terraform - Format and style
+        id: fmt
+        run: terraform fmt -check -diff -recursive
+        continue-on-error: true
+
+      - name: Terraform - Init
+        id: init
+        run: terraform init
+
+      - name: Terraform - Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform - Destroy
+        id: plan
+        run: |
+          terraform destroy \
+            -var "host_project_id=${{ vars.HOST_PROJECT_ID }}" \
+            -var "service_project_id=${{ vars.SERVICE_PROJECT_ID }}" \
+            -var "region=${{ vars.REGION }}" \
+            -auto-approve
+
+      
+

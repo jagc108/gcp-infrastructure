@@ -1,0 +1,57 @@
+name: Terraform apply - Test
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "terraform/env/test/**"
+
+env:
+  TF_INPUT: false
+
+permissions:
+  id-token: write        # necesario para OIDC/WIF con GCP
+  contents: read
+  pull-requests: write
+
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform/env/test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # === Autenticación contra GCP usando Workload Identity Federation ===
+      - name: Authenticate to Google Cloud (WIF)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          # Definido como repo/env var en GitHub: projects/.../workloadIdentityPools/.../providers/...
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+
+          # Service Account que Terraform va a impersonar
+          service_account: ${{ vars.GCP_TF_SERVICE_ACCOUNT }}
+
+          # Para que Terraform use ADC sin key JSON larga
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.13.5
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      - name: Terraform Apply
+        id: apply
+        run: terraform apply -auto-approve

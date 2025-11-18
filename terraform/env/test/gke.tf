@@ -11,56 +11,31 @@ module "gke" {
   }
 
   project_id = var.service_project_id
-  name       = "shared-vpc-gke"
+  name       = var.gke_cluster_name
 
-  regional = true
+  regional = var.gke_regional
   region   = var.region
 
   network            = module.shared_vpc_network.network_name
   network_project_id = var.host_project_id
-  subnetwork         = "gke-subnet"
+  subnetwork         = var.gke_subnet_name
 
-  ip_range_pods     = "gke-pods"
-  ip_range_services = "gke-services"
+  ip_range_pods     = var.gke_pods_secondary_range_name
+  ip_range_services = var.gke_services_secondary_range_name
 
-  enable_private_nodes    = true
-  enable_private_endpoint = false
-  master_ipv4_cidr_block  = "172.16.0.0/28"
+  enable_private_nodes    = var.gke_enable_private_nodes
+  enable_private_endpoint = var.gke_enable_private_endpoint
+  master_ipv4_cidr_block  = var.gke_master_ipv4_cidr_block
 
-  master_authorized_networks = [
-    {
-      cidr_block   = "0.0.0.0/0"
-      display_name = "all"
-    }
-  ]
+  release_channel = var.gke_release_channel
+
+  master_authorized_networks = var.gke_master_authorized_networks
 
   remove_default_node_pool = true
 
-  node_pools = [
-    {
-      name         = "primary-nodes"
-      machine_type = "e2-medium"
-      min_count    = 3
-      max_count    = 3
-      autoscaling  = false
-      auto_upgrade = true
-      auto_repair  = true
-    }
-  ]
+  node_pools = var.gke_node_pools
 
-  node_pools_oauth_scopes = {
-    all = [
-      "https://www.googleapis.com/auth/cloud-platform",
-    ]
-  }
-
-  node_pools_labels = {
-    all = {
-      env = "prod"
-    }
-  }
-
-  node_pools_tags = {
-    all = ["gke-node"]
-  }
+  node_pools_oauth_scopes = var.gke_node_pools_oauth_scopes
+  node_pools_labels       = var.gke_node_pools_labels
+  node_pools_tags         = var.gke_node_pools_tags
 }

@@ -20,39 +20,39 @@ module "shared_vpc_network" {
   version = "13.0.0"
 
   project_id   = var.host_project_id
-  network_name = "shared-vpc-network"
+  network_name = var.network_name
   routing_mode = "REGIONAL"
 
   subnets = [
     {
-      subnet_name           = "gke-subnet"
-      subnet_ip             = "10.0.0.0/20"
+      subnet_name           = var.gke_subnet_name
+      subnet_ip             = var.gke_subnet_ip_cidr
       subnet_region         = var.region
-      subnet_private_access = "true"
+      subnet_private_access = tostring(var.gke_subnet_private_ip_google_access)
     },
     {
-      subnet_name           = "internal-subnet-1"
-      subnet_ip             = "10.3.0.0/20"
+      subnet_name           = var.internal_subnet_1_name
+      subnet_ip             = var.internal_subnet_1_ip_cidr
       subnet_region         = var.region
-      subnet_private_access = "true"
+      subnet_private_access = tostring(var.internal_subnet_1_private_ip_google_access)
     },
     {
-      subnet_name           = "internal-subnet-2"
-      subnet_ip             = "10.4.0.0/20"
+      subnet_name           = var.internal_subnet_2_name
+      subnet_ip             = var.internal_subnet_2_ip_cidr
       subnet_region         = var.region
-      subnet_private_access = "true"
+      subnet_private_access = tostring(var.internal_subnet_2_private_ip_google_access)
     },
   ]
 
   secondary_ranges = {
-    "gke-subnet" = [
+    (var.gke_subnet_name) = [
       {
-        range_name    = "gke-pods"
-        ip_cidr_range = "10.1.0.0/16"
+        range_name    = var.gke_pods_secondary_range_name
+        ip_cidr_range = var.gke_pods_secondary_range_cidr
       },
       {
-        range_name    = "gke-services"
-        ip_cidr_range = "10.2.0.0/20"
+        range_name    = var.gke_services_secondary_range_name
+        ip_cidr_range = var.gke_services_secondary_range_cidr
       }
     ]
   }
@@ -66,24 +66,24 @@ module "cloud_router_nat" {
   source  = "terraform-google-modules/cloud-router/google"
   version = "8.0.0"
 
-  name       = "shared-vpc-nat-router"
+  name       = var.cloud_router_name
   project_id = var.host_project_id
   region     = var.region
   network    = module.shared_vpc_network.network_name
 
   bgp = {
-    asn = "65001"
+    asn = tostring(var.cloud_router_bgp_asn)
   }
 
   nats = [
     {
-      name                               = "shared-vpc-nat"
-      nat_ip_allocate_option             = "AUTO_ONLY"
+      name                               = var.cloud_nat_name
+      nat_ip_allocate_option             = var.cloud_nat_ip_allocate_option
       source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 
       log_config = {
-        enable = true
-        filter = "ERRORS_ONLY"
+        enable = var.cloud_nat_log_enable
+        filter = var.cloud_nat_log_filter
       }
     }
   ]

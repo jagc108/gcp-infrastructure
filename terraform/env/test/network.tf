@@ -4,6 +4,10 @@
 
 resource "google_compute_shared_vpc_host_project" "host" {
   project = var.host_project_id
+
+  depends_on = [
+    google_project_service.host_compute
+  ]
 }
 
 resource "google_compute_shared_vpc_service_project" "service" {
@@ -56,6 +60,10 @@ module "shared_vpc_network" {
       }
     ]
   }
+
+  depends_on = [
+    google_project_service.host_compute
+  ]
 }
 
 ########################################
@@ -87,4 +95,9 @@ module "cloud_router_nat" {
       }
     }
   ]
+
+  depends_on = [
+    google_project_service.host_compute
+  ]
+  
 }

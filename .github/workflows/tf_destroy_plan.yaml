@@ -1,12 +1,7 @@
-name: Terraform apply - Test
+name: Terraform Destroy Plan - Test
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "terraform/env/test/**"
 
 env:
   TF_INPUT: false
@@ -16,9 +11,8 @@ permissions:
   contents: read
   pull-requests: write
 
-
 jobs:
-  deploy:
+  plan:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -44,20 +38,30 @@ jobs:
           create_credentials_file: true
           export_environment_variables: true
 
-      - name: Setup Terraform
+      - name: Terraform - Setup
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.13.5
 
-      - name: Terraform Init
+      - name: Terraform - Format and style
+        id: fmt
+        run: terraform fmt -check -diff -recursive
+        continue-on-error: true
+
+      - name: Terraform - Init
         id: init
         run: terraform init
 
-      - name: Terraform Apply
-        id: apply
+      - name: Terraform - Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Destroy - Plan
+        id: plan
         run: |
-          terraform apply \
+          terraform plan \
             -var "host_project_id=${{ vars.HOST_PROJECT_ID }}" \
             -var "service_project_id=${{ vars.SERVICE_PROJECT_ID }}" \
             -var "region=${{ vars.REGION }}" \
-            -auto-approve
+            -no-color -destroy
+

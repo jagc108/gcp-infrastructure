@@ -63,7 +63,11 @@ jobs:
       - name: Terraform - Plan
         id: plan
         run: |
-          terraform plan -out=plan.tmp
+          terraform plan \
+            -var "host_project_id=${{ vars.HOST_PROJECT_ID }}" \
+            -var "service_project_id=${{ vars.SERVICE_PROJECT_ID }}" \
+            -var "region=${{ vars.REGION }}" \
+            -out=plan.tmp
           terraform show -no-color plan.tmp >${GITHUB_WORKSPACE}/plan.out
 
       - name: Terraform - Show Plan in PR

@@ -54,4 +54,9 @@ jobs:
 
       - name: Terraform Apply
         id: apply
-        run: terraform apply -auto-approve
+        run: |
+          terraform apply \
+            -var "host_project_id=${{ vars.HOST_PROJECT_ID }}" \
+            -var "service_project_id=${{ vars.SERVICE_PROJECT_ID }}" \
+            -var "region=${{ vars.REGION }}" \
+            -auto-approve

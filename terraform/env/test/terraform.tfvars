@@ -66,6 +66,8 @@ gke_master_authorized_networks = [
   }
 ]
 
+gke_deletion_protection = false
+
 ############################
 # GKE Node pools
 ############################

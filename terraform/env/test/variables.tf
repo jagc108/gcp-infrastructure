@@ -93,6 +93,7 @@ variable "internal_subnet_2_private_ip_google_access" {
   default     = true
 }
 
+
 ############################
 # GKE secondary ranges
 ############################
@@ -213,6 +214,12 @@ variable "gke_master_authorized_networks" {
       display_name = "all"
     }
   ]
+}
+
+variable "gke_deletion_protection" {
+  description = "Whether to enable deletion protection on the GKE cluster"
+  type        = bool
+  default     = true
 }
 
 ############################

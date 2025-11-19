@@ -39,6 +39,8 @@ module "gke" {
   node_pools_labels       = var.gke_node_pools_labels
   node_pools_tags         = var.gke_node_pools_tags
 
+  gateway_api_channel = var.gateway_api_channel
+
   deletion_protection = var.gke_deletion_protection
 
   depends_on = [

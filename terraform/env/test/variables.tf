@@ -216,6 +216,12 @@ variable "gke_master_authorized_networks" {
   ]
 }
 
+variable "gateway_api_channel" {
+  description = "The Gateway API channel of this cluster. Accepted values are CHANNEL_STANDARD and CHANNEL_DISABLED."
+  type        = string
+  default     = "CHANNEL_STANDARD"
+}
+
 variable "gke_deletion_protection" {
   description = "Whether to enable deletion protection on the GKE cluster"
   type        = bool

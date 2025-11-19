@@ -43,6 +43,9 @@ module "gke" {
 
   depends_on = [
     google_project_service.service_compute,
-    google_project_service.service_container
+    google_project_service.service_container,
+    google_project_iam_member.host_network_user_for_gke_sa,
+    google_project_iam_member.host_service_agent_user_for_gke_sa,
+    google_project_iam_member.host_network_user_for_cloudservices_sa,
   ]
 }

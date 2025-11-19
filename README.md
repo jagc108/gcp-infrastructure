@@ -1,21 +1,30 @@
-# GCP Shared VPC + GKE (Prod)
+# GCP Shared VPC + GKE
 
 Terraform configuration to provision:
 
-- A **Shared VPC** in a **host project**
+- A **Shared VPC** in a **host project** (optional, for corporate orgs)
 - **3 subnets** (one for GKE with secondary ranges, two internal)
 - **Cloud Router + Cloud NAT**
-- A **private, VPC-native GKE Standard cluster** in a **service project** using the Shared VPC
-- **IAM bindings** required for GKE + Shared VPC
+- A **private, VPC-native GKE Standard cluster** in a **service project** (or same project in sandbox)
+- **IAM bindings** required for GKE + Shared VPC (when enabled)
 - **Required GCP APIs enabled** in host and service projects
 - **Remote state** stored in a GCS bucket
-- **GitHub Actions** workflows for `terraform plan & apply` using **Workload Identity Federation (WIF)**
+- **GitHub Actions** workflows for:
+  - `terraform plan` (prod)
+  - `terraform apply` (test)
+  - `terraform destroy -plan` (test)
+  - `terraform destroy` (test)
+  using **Workload Identity Federation (WIF)**
 
-This repo is structured around `terraform/env/test`.
+Repo layout (simplified):
+
+- `terraform/env/test/` → test environment (Shared VPC + GKE)
+- `.github/workflows/` → CI/CD workflows (plan/apply/destroy)
+- `README-ci-wif.md` → detailed guide for SA + WIF + GitHub Actions auth
 
 ---
 
-## Usage
+## Usage (prod example)
 
 From the repo root:
 
@@ -25,7 +34,7 @@ cd terraform/env/test
 # Set required variables (example)
 export TF_VAR_host_project_id="my-host-project"
 export TF_VAR_service_project_id="my-service-project"
-export TF_VAR_region="us-east1"
+export TF_VAR_region="us-central1"
 
 terraform init
 terraform plan
@@ -39,11 +48,11 @@ Make sure the bucket exists and the Terraform service account has access.
 
 ## Requirements
 
-| Name      | Version   |
-|-----------|-----------|
-| terraform | >= 1.5.0  |
-| google    | >= 7.0.0, < 8.0.0 |
-| google-beta | >= 7.0.0, < 8.0.0 |
+| Name        | Version              |
+|-------------|----------------------|
+| terraform   | >= 1.5.0             |
+| google      | >= 7.0.0, < 8.0.0    |
+| google-beta | >= 7.0.0, < 8.0.0    |
 
 ---
 
@@ -66,89 +75,96 @@ Make sure the bucket exists and the Terraform service account has access.
 
 ---
 
-## Resources (high level)
+## Inputs (high level)
 
-Core resources managed by this configuration include:
+Key inputs from `variables.tf` (simplified):
 
-- **Project APIs**
-  - `google_project_service.host_compute`
-  - `google_project_service.host_iam`
-  - `google_project_service.host_cloudresourcemanager`
-  - `google_project_service.service_compute`
-  - `google_project_service.service_container`
-  - `google_project_service.service_iam`
-  - `google_project_service.service_cloudresourcemanager`
+- **Mode / topology**
+  - `enable_shared_vpc` (bool, default `false`):  
+    - `true` → corporate mode (Shared VPC host + service projects, requires Organization)
+    - `false` → sandbox mode (single project: host == service)
 
-- **Networking / Shared VPC**
-  - `google_compute_shared_vpc_host_project`
-  - `google_compute_shared_vpc_service_project`
-  - `module.shared_vpc_network`:
-    - VPC (`shared-vpc-network`)
-    - Subnets:
-      - `gke-subnet` (with `gke-pods` and `gke-services` secondary ranges)
-      - `internal-subnet-1`
-      - `internal-subnet-2`
+- **Projects / region**
+  - `host_project_id` (string): project where the VPC/NAT live
+  - `service_project_id` (string): project where the GKE cluster lives
+  - `region` (string, default `us-central1`)
 
-- **NAT**
-  - `module.cloud_router_nat`:
-    - Cloud Router
-    - Cloud NAT (`shared-vpc-nat`)
+- **Network**
+  - `network_name` (default `shared-vpc-network`)
+  - Subnets + secondary ranges:
+    - `gke_subnet_name`, `gke_subnet_ip_cidr`, `gke_subnet_private_ip_google_access`
+    - `internal_subnet_1_*`, `internal_subnet_2_*`
+    - `gke_pods_secondary_range_*`, `gke_services_secondary_range_*`
 
-- **GKE**
-  - `module.gke`:
-    - Regional, VPC-native, **Standard** cluster
-    - Private nodes (`enable_private_nodes = true`)
-    - Public control plane endpoint (`enable_private_endpoint = false`)
-    - Managed node pool (`primary-nodes`)
+- **Cloud Router / NAT**
+  - `cloud_router_name`, `cloud_router_bgp_asn`
+  - `cloud_nat_name`, `cloud_nat_ip_allocate_option`, `cloud_nat_log_enable`, `cloud_nat_log_filter`
 
-- **IAM**
-  - `data.google_project.service`
-  - `google_project_iam_member` bindings in the host project for:
-    - GKE service agent (network user + host service agent user)
-    - Cloud services SA (network user)
+- **GKE cluster**
+  - `gke_cluster_name`, `gke_regional`, `gke_release_channel`
+  - `gke_enable_private_nodes`, `gke_enable_private_endpoint`
+  - `gke_master_ipv4_cidr_block`
+  - `gke_master_authorized_networks`
+  - `gke_node_pools` (name, machine_type, min/max, autoscaling, etc.)
+  - `gke_node_pools_oauth_scopes`
+  - `gke_node_pools_labels`
+  - `gke_node_pools_tags`
+  - `gke_deletion_protection` (bool, default `true`)
 
 ---
 
-## Inputs
+## Deployment modes: corporate vs sandbox
 
-| Name                         | Description                                              | Type   | Default         | Required |
-|------------------------------|----------------------------------------------------------|--------|-----------------|----------|
-| `host_project_id`            | GCP project ID of the Shared VPC **host** project        | string | n/a             | yes      |
-| `service_project_id`         | GCP project ID of the **service** project where GKE runs | string | n/a             | yes      |
-| `region`                     | GCP region for network and GKE cluster                   | string | `"us-central1"` | no       |
-| `network_name`               | Name of the Shared VPC network                           | string | `"shared-vpc-network"` | no |
-| `gke_subnet_name`            | Name of the subnet for GKE                               | string | `"gke-subnet"`  | no       |
-| `gke_subnet_ip_cidr`         | CIDR of the GKE subnet                                   | string | `"10.0.0.0/20"` | no       |
-| `gke_subnet_private_ip_google_access` | Enable Private Google Access on the GKE subnet  | bool   | `true`          | no       |
-| `internal_subnet_1_name`     | Name of the first internal subnet                        | string | `"internal-subnet-1"` | no |
-| `internal_subnet_1_ip_cidr`  | CIDR of the first internal subnet                        | string | `"10.3.0.0/20"` | no       |
-| `internal_subnet_1_private_ip_google_access` | Private Google Access on internal subnet 1 | bool | `true` | no |
-| `internal_subnet_2_name`     | Name of the second internal subnet                       | string | `"internal-subnet-2"` | no |
-| `internal_subnet_2_ip_cidr`  | CIDR of the second internal subnet                       | string | `"10.4.0.0/20"` | no       |
-| `internal_subnet_2_private_ip_google_access` | Private Google Access on internal subnet 2 | bool | `true` | no |
-| `gke_pods_secondary_range_name` | Name of the secondary range for Pods                 | string | `"gke-pods"`    | no       |
-| `gke_pods_secondary_range_cidr` | CIDR of the secondary range for Pods                 | string | `"10.1.0.0/16"` | no       |
-| `gke_services_secondary_range_name` | Name of the secondary range for Services         | string | `"gke-services"`| no       |
-| `gke_services_secondary_range_cidr` | CIDR of the secondary range for Services         | string | `"10.2.0.0/20"` | no       |
-| `cloud_router_name`          | Name of the Cloud Router                                 | string | `"shared-vpc-nat-router"` | no |
-| `cloud_router_bgp_asn`       | BGP ASN for the Cloud Router                             | number | `65001`         | no       |
-| `cloud_nat_name`             | Name of the Cloud NAT                                    | string | `"shared-vpc-nat"` | no   |
-| `cloud_nat_ip_allocate_option` | NAT IP allocation option (`AUTO_ONLY`, `MANUAL_ONLY`) | string | `"AUTO_ONLY"`   | no       |
-| `cloud_nat_log_enable`       | Enable Cloud NAT logging                                 | bool   | `true`          | no       |
-| `cloud_nat_log_filter`       | Cloud NAT logging filter                                 | string | `"ERRORS_ONLY"` | no       |
-| `gke_cluster_name`           | Name of the GKE cluster                                  | string | `"shared-vpc-gke"` | no  |
-| `gke_regional`               | Whether the cluster is regional (`true`) or zonal        | bool   | `true`          | no       |
-| `gke_release_channel`        | GKE release channel (`RAPID`, `REGULAR`, `STABLE`)       | string | `"REGULAR"`     | no       |
-| `gke_enable_private_nodes`   | Enable private nodes (no public IPs)                     | bool   | `true`          | no       |
-| `gke_enable_private_endpoint`| Enable private control plane endpoint                    | bool   | `false`         | no       |
-| `gke_master_ipv4_cidr_block` | CIDR block for master in private cluster                 | string | `"172.16.0.0/28"` | no    |
-| `gke_master_authorized_networks` | List of CIDR blocks allowed to reach control plane  | list(object) | see `variables.tf` default | no |
-| `gke_node_pools`             | List of node pools configuration                         | list(object) | see `variables.tf` default | no |
-| `gke_node_pools_oauth_scopes`| OAuth scopes per group for node pools                    | map(list(string)) | `{ all = ["https://www.googleapis.com/auth/cloud-platform"] }` | no |
-| `gke_node_pools_labels`      | Labels per group for node pools                          | map(map(string)) | `{ all = { env = "prod" } }` | no |
-| `gke_node_pools_tags`        | Network tags per group for node pools                    | map(list(string)) | `{ all = ["gke-node"] }` | no |
+This module supports two main modes via `enable_shared_vpc`:
 
-> Other configuration (remote state bucket, WIF provider, service account email, etc.) is managed outside of Terraform and referenced by the backend config and GitHub Actions workflow.
+### 1. Corporate / Organization mode (Shared VPC)
+
+Use when you have a **Google Cloud Organization** and want a proper **Shared VPC** topology.
+
+```hcl
+enable_shared_vpc = true
+
+host_project_id    = "corp-shared-vpc-host"
+service_project_id = "corp-gke-service"
+region             = "us-central1"
+```
+
+Behavior:
+
+- Creates:
+  - `google_compute_shared_vpc_host_project` in `host_project_id`
+  - `google_compute_shared_vpc_service_project` binding `service_project_id` to the host
+- The VPC, subnets and NAT live in the **host** project.
+- The GKE cluster runs in the **service** project, attached to the Shared VPC.
+
+Requirements:
+
+- Both projects must belong to the **same Organization**.
+- The Terraform service account must have permissions to:
+  - Enable required APIs
+  - Manage Shared VPC and IAM bindings across host/service projects.
+
+### 2. Sandbox / Personal mode (single project, no org)
+
+Use when you are working with a **personal GCP account (`@gmail.com`)** or you **don’t have an Organization**.
+
+```hcl
+enable_shared_vpc = false
+
+# Single-project topology: host == service
+host_project_id    = "my-sandbox-project"
+service_project_id = "my-sandbox-project"
+region             = "us-central1"
+```
+
+Behavior:
+
+- **Does not** create Shared VPC resources.
+- The VPC, subnets, NAT and GKE cluster all live in the **same project**.
+- Avoids the error:  
+  _"Invalid resource usage: 'The project has no organization.'"_
+
+This is ideal for labs, testing, and personal accounts, while keeping the same Terraform code compatible with corporate environments.
 
 ---
 
@@ -164,7 +180,15 @@ Core resources managed by this configuration include:
 
 ## Architecture Overview
 
-- **Shared VPC** lives in the **host project**:
+- **Shared VPC (optional)**:
+  - When `enable_shared_vpc = true`:
+    - Shared VPC configured in the **host project**.
+    - Service project attached via `google_compute_shared_vpc_service_project`.
+  - When `enable_shared_vpc = false`:
+    - Single-project layout: `host_project_id == service_project_id`.
+    - No Shared VPC host/service resources are created.
+
+- **Network**:
   - 1 custom VPC: `shared-vpc-network`
   - Subnets:
     - `gke-subnet` (`10.0.0.0/20`) with:
@@ -174,11 +198,14 @@ Core resources managed by this configuration include:
     - `internal-subnet-2` (`10.4.0.0/20`)
   - Cloud Router + Cloud NAT providing egress for private workloads.
 
-- **GKE cluster** runs in the **service project**, attached to the Shared VPC:
+- **GKE cluster**:
   - Regional, VPC-native cluster
   - Private nodes (no public IPs on nodes)
   - Public API server endpoint, restricted via `master_authorized_networks`
-  - Managed node pool with configurable machine type and size (default `e2-medium` in prod examples)
+  - Managed node pool with configurable machine type and size (default `e2-medium` in examples)
+  - Optional deletion protection via `gke_deletion_protection`:
+    - `true` in prod (you must first set to `false` then apply, then destroy)
+    - `false` in sandbox to allow direct `terraform destroy`
 
 - **Project APIs**:
   - Terraform enables required APIs in both host and service projects:
@@ -189,9 +216,8 @@ Core resources managed by this configuration include:
   - APIs are created with `disable_on_destroy = false` so a Terraform destroy will not disable them.
 
 - **IAM**:
-  - GKE service agent and Cloud Services SA of the service project are granted:
-    - `roles/compute.networkUser` in the host project
-    - `roles/container.hostServiceAgentUser` in the host project (for the GKE service agent)
+  - When using Shared VPC, IAM bindings are created so:
+    - GKE service agent and Cloud Services SA of the service project can use the host VPC.
   - Terraform service account has the roles required to create/update these resources.
 
 ---
@@ -216,68 +242,302 @@ Recommended settings for the state bucket:
 - **Versioning enabled**
 - Optional: **CMEK** encryption via Cloud KMS
 - IAM:
-  - Terraform SA: `roles/storage.objectAdmin` (or custom minimal role)
+  - Terraform SA: `roles/storage.objectAdmin` (or a more restricted custom role)
   - No `allUsers` / `allAuthenticatedUsers` access
 
 ---
 
-## CI/CD – GitHub Actions (Terraform Plan)
+## CI/CD – GitHub Actions (Terraform + WIF)
 
-A GitHub Actions workflow (`.github/workflows/terraform-plan-prod.yml`) runs `terraform plan` on PRs targeting `main` and touching `terraform/env/test/**`.
+This repository includes several GitHub Actions workflows that use:
 
-Key points:
+- **Workload Identity Federation** (WIF) to authenticate to GCP (without JSON keys)
+- The same Terraform code, but targeting different directories / environments
 
-- Uses **Workload Identity Federation** (no static JSON keys):
-  - Action: `google-github-actions/auth@v2`
-  - Requires:
-    - `vars.GCP_WIF_PROVIDER` → full resource name of the Workload Identity Provider
-    - `vars.GCP_TF_SERVICE_ACCOUNT` → Terraform service account email
-- Steps:
-  - Checkout repo
-  - Authenticate to GCP via WIF
-  - Install Terraform (`hashicorp/setup-terraform@v2`)
-  - Render `terraform.tfvars` from environment variables (in CI)
+The detailed, step-by-step setup of the **Terraform Service Account** and **Workload Identity Federation** is documented in:
+
+👉 **[README-ci-wif.md](README-ci-wif.md)**
+
+### 1. Terraform Plan – Prod
+
+**File (example):**
+
+- `.github/workflows/tfplan.yml` (not shown here, but described previously)
+
+**Purpose:**
+
+- Run `terraform plan` for the **prod** environment (`environments/prod/`) on every Pull Request to `main` that touches `environments/prod/**`.
+- Post the Terraform plan as a **comment on the PR**.
+
+**Key points:**
+
+- Uses **WIF** via `google-github-actions/auth@v2`.
+- Uses repo/environment variables:
+  - `GCP_WIF_PROVIDER`
+  - `GCP_TF_SERVICE_ACCOUNT`
+- Renders a `terraform.tfvars` file on the fly using GitHub env/vars.
+- Runs:
   - `terraform fmt -check`
   - `terraform init`
   - `terraform validate`
-  - `terraform plan` (output saved to `plan.out`)
-  - Comment the plan in the PR using `actions/github-script@v8`
+  - `terraform plan`
+- Uploads the plan into a PR comment.
 
-Example auth step:
+See `README-ci-wif.md` for the full YAML and explanation of SA + WIF.
+
+---
+
+### 2. Terraform Apply – Test
+
+**File:**
+
+- `.github/workflows/tf_apply.yaml`
 
 ```yaml
-- name: Authenticate to Google Cloud (WIF)
-  uses: google-github-actions/auth@v2
-  with:
-    workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-    service_account: ${{ vars.GCP_TF_SERVICE_ACCOUNT }}
-    create_credentials_file: true
-    export_environment_variables: true
+name: Terraform apply - Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "terraform/env/test/**"
+
+env:
+  TF_INPUT: false
+
+permissions:
+  id-token: write        # necesario para OIDC/WIF con GCP
+  contents: read
+  pull-requests: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform/env/test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # === Autenticación contra GCP usando Workload Identity Federation ===
+      - name: Authenticate to Google Cloud (WIF)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_TF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.13.5
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform apply             -var "host_project_id=${{ vars.HOST_PROJECT_ID }}"             -var "service_project_id=${{ vars.SERVICE_PROJECT_ID }}"             -var "region=${{ vars.REGION }}"             -auto-approve
 ```
 
----
+**What it does:**
 
-## Prerequisites
+- **Environment:** `terraform/env/test` (test environment).
+- **Triggers:**
+  - `workflow_dispatch` → manual run from the GitHub UI.
+  - `push` to `main` that touches `terraform/env/test/**`.
+- **Auth:** uses WIF (same pattern as in prod plan).
+- **Terraform:**
+  - `terraform init`
+  - `terraform apply` with:
+    - `host_project_id`, `service_project_id`, `region` passed from repo/env vars.
+  - `-auto-approve` → applies without interactive confirmation (only use this in non-prod or with proper review gates).
 
-- **GCP**:
-  - Organization + billing configured
-  - Host and service projects created
-  - Permissions for the Terraform service account to:
-    - Enable required APIs in both projects (`google_project_service`)
-    - Manage networking, GKE, and IAM as defined in this module
-
-- **Terraform service account**:
-  - Appropriate IAM roles in host + service projects and state bucket project
-  - `roles/cloudkms.cryptoKeyEncrypterDecrypter` if using CMEK for the state bucket
-
-- **Workload Identity Federation**:
-  - Workload Identity Pool + OIDC Provider for the GitHub repo
-  - Binding `roles/iam.workloadIdentityUser` on the Terraform SA to the pool/provider principal set
-
-- **GitHub**:
-  - Repository or environment variables:
-    - `GCP_WIF_PROVIDER`
-    - `GCP_TF_SERVICE_ACCOUNT`
-    - Project IDs / regions to render `terraform.tfvars` in CI
+Use this workflow to **deploy/apply changes automatically** to the **test environment**.
 
 ---
+
+### 3. Terraform Destroy – Plan (Test)
+
+**File:**
+
+- `.github/workflows/tf_destroy_plan.yaml`
+
+```yaml
+name: Terraform Destroy Plan - Test
+
+on:
+  workflow_dispatch:
+
+env:
+  TF_INPUT: false
+
+permissions:
+  id-token: write        # necesario para OIDC/WIF con GCP
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform/env/test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_TF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Terraform - Setup
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.13.5
+
+      - name: Terraform - Format and style
+        id: fmt
+        run: terraform fmt -check -diff -recursive
+        continue-on-error: true
+
+      - name: Terraform - Init
+        id: init
+        run: terraform init
+
+      - name: Terraform - Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Destroy - Plan
+        id: plan
+        run: |
+          terraform plan             -var "host_project_id=${{ vars.HOST_PROJECT_ID }}"             -var "service_project_id=${{ vars.SERVICE_PROJECT_ID }}"             -var "region=${{ vars.REGION }}"             -no-color -destroy
+```
+
+**What it does:**
+
+- **Environment:** `terraform/env/test`.
+- **Trigger:** only `workflow_dispatch` (manual).
+- **Auth:** WIF.
+- **Terraform:**
+  - `fmt` (check only)
+  - `init`
+  - `validate`
+  - `plan -destroy` → shows what would be deleted in the test stack, **without** actually destroying resources.
+
+Use this workflow when you want to **review the destruction plan** of the test environment before running the real `destroy`.
+
+---
+
+### 4. Terraform Destroy – Run (Test)
+
+**File:**
+
+- `.github/workflows/tf_destroy_run.yaml`
+
+```yaml
+name: Terraform Destroy - Test
+
+on:
+  workflow_dispatch:
+
+env:
+  TF_INPUT: false
+
+permissions:
+  id-token: write        # necesario para OIDC/WIF con GCP
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform/env/test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_TF_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Terraform - Setup
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.13.5
+
+      - name: Terraform - Format and style
+        id: fmt
+        run: terraform fmt -check -diff -recursive
+        continue-on-error: true
+
+      - name: Terraform - Init
+        id: init
+        run: terraform init
+
+      - name: Terraform - Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform - Destroy
+        id: plan
+        run: |
+          terraform destroy             -var "host_project_id=${{ vars.HOST_PROJECT_ID }}"             -var "service_project_id=${{ vars.SERVICE_PROJECT_ID }}"             -var "region=${{ vars.REGION }}"             -auto-approve
+```
+
+**What it does:**
+
+- **Environment:** `terraform/env/test`.
+- **Trigger:** `workflow_dispatch` (manual only).
+- **Auth:** WIF.
+- **Terraform:**
+  - `fmt` (check only)
+  - `init`
+  - `validate`
+  - `destroy -auto-approve` → actually **destroys** all Terraform-managed resources in the test environment.
+
+> ⚠️ Use this workflow with care.  
+> In test/sandbox this is fine, but in prod you’d typically:
+> - Require extra approvals, or
+> - Use a multi-step process (`plan -destroy` + manual apply), or
+> - Keep `deletion_protection = true` on critical resources (e.g., GKE clusters) and explicitly disable it before destroy.
+
+---
+
+## More details: SA + WIF setup
+
+For a detailed, step-by-step guide on how to:
+
+- Create the **Terraform Service Account**  
+- Configure **Workload Identity Federation** (Workload Identity Pool + Provider)  
+- Bind the pool to the SA (`roles/iam.workloadIdentityUser`)  
+- Wire variables (`GCP_WIF_PROVIDER`, `GCP_TF_SERVICE_ACCOUNT`, etc.) in GitHub
+
+👉 See **[README-ci-wif.md](README-ci-wif.md)**.
+

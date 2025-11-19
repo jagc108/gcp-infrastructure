@@ -1,4 +1,10 @@
 ############################
+# Shared VPC toggle
+############################
+
+enable_shared_vpc = false
+
+############################
 # VPC / Subnets
 ############################
 
@@ -59,6 +65,8 @@ gke_master_authorized_networks = [
     display_name = "all"
   }
 ]
+
+gke_deletion_protection = false
 
 ############################
 # GKE Node pools

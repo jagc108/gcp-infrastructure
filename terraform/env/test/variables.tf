@@ -15,7 +15,15 @@ variable "service_project_id" {
 variable "region" {
   description = "Region for the network and GKE cluster"
   type        = string
-  default     = "us-central1"
+}
+
+############################
+# Shared VPC toggle
+############################
+
+variable "enable_shared_vpc" {
+  description = "Whether to configure Shared VPC host/service projects (requires org-level project). Set to false for personal/sandbox (single-project)."
+  type        = bool
 }
 
 ############################
@@ -84,6 +92,7 @@ variable "internal_subnet_2_private_ip_google_access" {
   type        = bool
   default     = true
 }
+
 
 ############################
 # GKE secondary ranges
@@ -205,6 +214,12 @@ variable "gke_master_authorized_networks" {
       display_name = "all"
     }
   ]
+}
+
+variable "gke_deletion_protection" {
+  description = "Whether to enable deletion protection on the GKE cluster"
+  type        = bool
+  default     = true
 }
 
 ############################

@@ -1,394 +1,424 @@
-# GitHub Actions + Workload Identity Federation for Terraform
+# Terraform CI with GitHub Actions and Workload Identity Federation
 
 This document explains **step by step** how to:
 
-1. Create a **Terraform Service Account (SA)** in GCP  
+1. Create a **Terraform Service Account (TF SA)** in GCP  
 2. Configure **Workload Identity Federation (WIF)** so **GitHub Actions** can impersonate that SA  
-3. Wire everything into the **Terraform plan** workflow for this repo
+3. Understand **how IAM permissions differ** between:
+   - **Sandbox / single-project deployments**
+   - **Corporate / Shared VPC deployments**
+4. Wire everything into the **Terraform workflows** in this repo.
 
-It is written for the repo:
+It is a companion to the main `README.md` and the GitHub Actions workflows under `.github/workflows/`.
 
-- `jagc108/gcp-infrastructure` (adjust if you fork/rename)
+Repo reference:
 
-And assumes the Terraform code is under:
-
-- `terraform/env/test`
+- GitHub repo: `jagc108/gcp-infrastructure` (adjust if you fork/rename)
+- Terraform environments:
+  - `terraform/env/test/` (test/sandbox)
 
 ---
 
 ## 0. Concepts (very short version)
 
-- **Terraform Service Account (TF SA)**:  
-  The identity in GCP that actually creates/updates/destroys resources.
+- **Terraform Service Account (TF SA)**  
+  The identity in GCP that actually creates/updates/destroys resources when Terraform runs from GitHub Actions.
 
-- **Workload Identity Pool & Provider (WIP)**:  
-  A GCP mechanism that allows **external identities** (GitHub Actions OIDC tokens in this case) to obtain **short‑lived credentials** for a GCP service account **without** using long‑lived JSON keys.
+- **Workload Identity Pool & Provider (WIF)**  
+  A GCP mechanism that allows **external identities** (GitHub Actions OIDC tokens) to obtain **short-lived credentials** for a GCP service account **without JSON keys**.
 
-- **GitHub Actions OIDC**:  
-  GitHub emits an **OIDC token** for each workflow run. GCP verifies that token and, if it matches your conditions (repo, branch, etc.), allows impersonation of the TF SA.
+- **GitHub Actions OIDC**  
+  Each GitHub workflow run can request an **OIDC token** signed by GitHub.  
+  GCP verifies that token and, if it matches your conditions (repo, branch, etc.), allows impersonation of the TF SA.
+
+- **Deployment modes in this repo**  
+  - **Sandbox / Personal**: no org, single project; `host_project_id == service_project_id`.  
+  - **Corporate / Org**: Shared VPC host project + GKE service project; requires Organization.
+
+Most of the WIF setup is identical in both modes; what changes mainly is **where you grant IAM roles**.
 
 ---
 
-## 1. Naming and variables
+## 1. Choose your deployment mode
 
-Pick the following values (adapt names to your org):
+Before creating roles and WIF, decide which mode you’re using.
+
+### 1.1. Sandbox / Single-project mode
+
+Use this if:
+
+- You have a **personal account** (`@gmail.com`) or
+- You don’t have a **Google Cloud Organization**, or
+- You just want a **lab/sandbox** without Shared VPC.
+
+Terraform variables:
+
+```hcl
+enable_shared_vpc  = false
+host_project_id    = "my-sandbox-project"
+service_project_id = "my-sandbox-project"
+region             = "us-central1"
+```
+
+In this mode:
+
+- All resources (VPC, NAT, GKE, IAM, APIs) live in the **same project**.
+- You ONLY grant strong IAM roles to the TF SA in **that one project**.
+
+### 1.2. Corporate / Shared VPC mode
+
+Use this if:
+
+- You have a **Google Cloud Organization**, and
+- You want a **Shared VPC** topology (separate host + service projects).
+
+Terraform variables:
+
+```hcl
+enable_shared_vpc  = true
+host_project_id    = "corp-shared-vpc-host"
+service_project_id = "corp-gke-service"
+region             = "us-central1"
+```
+
+In this mode:
+
+- **Host project**: owns the VPC, subnets, Cloud Router, NAT.
+- **Service project**: owns the GKE cluster.
+- Terraform must have IAM in **both** host and service projects.
+- Additional IAM bindings let the **GKE service agent** of the service project use the Shared VPC in the host project.
+
+---
+
+## 2. Common setup: variables and Terraform Service Account
+
+These steps are the same for sandbox and corporate, only the project IDs differ.
+
+### 2.1. Define variables
+
+Choose your project IDs and names:
 
 ```bash
-# Project where the TF SA and WIF pool/provider will live
-INFRA_PROJECT_ID="my-host-project-id"   # or a dedicated infra project
+# Project where the TF SA and WIF will live
+# Sandbox: this is usually also your host/service project
+INFRA_PROJECT_ID="aerobic-pivot-632458-k7"
 
-# Host and service projects (can be the same as INFRA in sandbox)
-HOST_PROJECT_ID="my-host-project-id"
-SERVICE_PROJECT_ID="my-service-project-id"
+# Sandbox mode (single project):
+SANDBOX_PROJECT_ID="aerobic-pivot-632458-k7"
+
+# Corporate mode: separate host/service projects
+HOST_PROJECT_ID="corp-shared-vpc-host"
+SERVICE_PROJECT_ID="corp-gke-service"
 
 # Terraform service account
 TF_SA_NAME="github-tf-prod"
-TF_SA_DISPLAY_NAME="Terraform SA for GitHub Actions - prod"
-
-# Workload Identity Pool + Provider
-WIP_POOL_ID="github-pool"
-WIP_POOL_DISPLAY_NAME="GitHub Actions Pool"
-
-WIP_PROVIDER_ID="github-actions-prod"
-WIP_PROVIDER_DISPLAY_NAME="GitHub Actions provider for gcp-infrastructure prod"
+TF_SA_DISPLAY_NAME="Terraform SA for GitHub Actions"
 
 # GitHub repo (org/repo)
 GITHUB_REPO="jagc108/gcp-infrastructure"
+
+# WIF pool/provider IDs
+WIP_POOL_ID="github-pool"
+WIP_POOL_DISPLAY_NAME="GitHub Actions Pool"
+WIP_PROVIDER_ID="github-actions"
+WIP_PROVIDER_DISPLAY_NAME="GitHub Actions provider for this repo"
 ```
 
----
+### 2.2. Create the Terraform Service Account (TF SA)
 
-## 2. Enable required APIs
-
-In the **INFRA project** (where you create WIF and the TF SA), enable:
+Create the SA in the **infra project**:
 
 ```bash
 gcloud config set project "${INFRA_PROJECT_ID}"
 
-gcloud services enable iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com iamcredentials.googleapis.com cloudresourcemanager.googleapis.com
-```
+gcloud iam service-accounts create "${TF_SA_NAME}"   --project="${INFRA_PROJECT_ID}"   --display-name="${TF_SA_DISPLAY_NAME}"
 
-If your **host** and **service** projects differ from `INFRA_PROJECT_ID`, they also need:
-
-```bash
-gcloud services enable compute.googleapis.com container.googleapis.com iam.googleapis.com cloudresourcemanager.googleapis.com
-```
-
----
-
-## 3. Create the Terraform Service Account
-
-Create the SA in the **INFRA project**:
-
-```bash
-gcloud iam service-accounts create "${TF_SA_NAME}" --project="${INFRA_PROJECT_ID}" --display-name="${TF_SA_DISPLAY_NAME}"
-```
-
-Get its email:
-
-```bash
 TF_SA_EMAIL="${TF_SA_NAME}@${INFRA_PROJECT_ID}.iam.gserviceaccount.com"
 echo "${TF_SA_EMAIL}"
 ```
 
-You’ll use this email in:
+You will:
 
-- IAM bindings (projects + state bucket)
-- Workload Identity binding
-- GitHub Actions `GCP_TF_SERVICE_ACCOUNT` variable
-
----
-
-## 4. Grant IAM roles to the Terraform SA
-
-### 4.1. On the host project (network, NAT, IAM, APIs)
-
-The TF SA needs enough permissions to:
-
-- Manage VPC, subnets, Cloud Router, NAT
-- Configure Shared VPC (in corporate mode)
-- Manage IAM bindings in the host project
-- Enable required APIs via `google_project_service`
-
-Example (min-viable, still a bit coarse; in real org you might create a custom role):
-
-```bash
-# Host project: networking + IAM + APIs
-gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/compute.networkAdmin"
-
-gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/compute.securityAdmin"
-
-gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/iam.securityAdmin"
-
-gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/serviceusage.serviceUsageAdmin"
-
-gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/container.admin"
-```
-
-### 4.2. On the service project (GKE, IAM, APIs)
-
-```bash
-# Service project: GKE + IAM + APIs
-gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/container.admin"
-
-gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/compute.networkAdmin"
-
-gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/iam.serviceAccountAdmin"
-
-gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/serviceusage.serviceUsageAdmin"
-```
-
-> Ajusta estos roles según la política de **least privilege** de tu organización.  
-> Para labs/sandbox, esto es suficiente y simple.
-
-### 4.3. On the state bucket project
-
-Si el bucket de state vive en `INFRA_PROJECT_ID`:
-
-```bash
-TF_STATE_BUCKET="tfstate-org-shared"
-
-# Permiso para leer/escribir el tfstate
-gcloud storage buckets add-iam-binding "gs://${TF_STATE_BUCKET}" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/storage.objectAdmin"
-```
-
-Si usas **CMEK** para el bucket, añade:
-
-```bash
-KMS_KEY_ID="projects/infra-shared/locations/us-central1/keyRings/tfstate-keyring/cryptoKeys/tfstate-key"
-
-gcloud kms keys add-iam-policy-binding "$(basename "${KMS_KEY_ID}")" --keyring="tfstate-keyring" --location="us-central1" --project="infra-shared" --member="serviceAccount:${TF_SA_EMAIL}" --role="roles/cloudkms.cryptoKeyEncrypterDecrypter"
-```
-
-(ajusta `project`/`location`/`keyRing`/`key` a tu caso real).
+- Grant IAM roles to this SA in the relevant projects.
+- Allow the Workload Identity Pool to impersonate this SA.
+- Use its email (`TF_SA_EMAIL`) in GitHub Actions (`GCP_TF_SERVICE_ACCOUNT`).
 
 ---
 
-## 5. Create the Workload Identity Pool
+## 3. IAM for Terraform SA – Sandbox mode
 
-Now create the **WIF pool** in the **INFRA project**:
-
-```bash
-gcloud iam workload-identity-pools create "${WIP_POOL_ID}" --project="${INFRA_PROJECT_ID}" --location="global" --display-name="${WIP_POOL_DISPLAY_NAME}"
-```
-
-Get the pool resource name:
+In **sandbox mode**, you have a single project where everything lives:
 
 ```bash
-gcloud iam workload-identity-pools describe "${WIP_POOL_ID}" --project="${INFRA_PROJECT_ID}" --location="global" --format="value(name)"
+PROJECT_ID="${SANDBOX_PROJECT_ID}" 
 ```
 
-Example output:
+Terraform controls:
+
+- Network (VPC, subnets, NAT, router)
+- GKE cluster + node pools
+- IAM bindings on GKE SAs
+- Enabling required APIs
+
+Because all of that happens in **one project**, you only need to grant roles in that project.
+
+### 3.1. IAM roles for TF SA (sandbox)
+
+```bash
+# GKE admin (includes container.clusters.list, manage clusters, etc.)
+gcloud projects add-iam-policy-binding "${PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/container.admin"
+
+# Network + compute operations (VPC, subnets, routers, etc.)
+gcloud projects add-iam-policy-binding "${PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/compute.networkAdmin"
+
+# Create and manage service accounts (for cluster/node SAs)
+gcloud projects add-iam-policy-binding "${PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/iam.serviceAccountAdmin"
+
+# ➕ IMPORTANT: allow the TF SA to "act as" other service accounts (like the GKE SA it creates)
+gcloud projects add-iam-policy-binding "${PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/iam.serviceAccountUser"
+
+# Enable/disable services from Terraform (google_project_service)
+gcloud projects add-iam-policy-binding "${PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/serviceusage.serviceUsageAdmin"
+
+# Manage IAM bindings at project level
+# (needed for the module to give roles to GKE SAs, e.g. monitoring.metricWriter)
+gcloud projects add-iam-policy-binding "${PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/resourcemanager.projectIamAdmin"
+```
+
+Why `roles/iam.serviceAccountUser` matters:
+
+- The GKE module creates a service account like `tf-gke-<cluster>-<suffix>@PROJECT_ID.iam.gserviceaccount.com`.
+- When creating the cluster, GKE needs to **use** that SA.
+- The caller (your TF SA) must have `iam.serviceAccounts.actAs` on that SA.
+- That permission is provided by `roles/iam.serviceAccountUser` on the project.
+
+Without it, you see errors like:
 
 ```text
-projects/123456789012/locations/global/workloadIdentityPools/github-pool
+The user does not have access to service account "...". Ask a project owner to grant you the iam.serviceAccountUser role on the service account.
 ```
 
-Note the **project number** (`123456789012`) – you need it for the provider and for the GitHub Actions variable.
-
----
-
-## 6. Create the Workload Identity Provider (GitHub OIDC)
-
-Create an **OIDC provider** that trusts GitHub Actions tokens from **your repo**:
-
-> ⚠️ Display name must be <= 32 chars, so keep it short.
+### 3.2. Enable APIs in sandbox project
 
 ```bash
-gcloud iam workload-identity-pools providers create-oidc "${WIP_PROVIDER_ID}" --project="${INFRA_PROJECT_ID}" --location="global" --workload-identity-pool="${WIP_POOL_ID}" --display-name="${WIP_PROVIDER_DISPLAY_NAME}" --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref" --attribute-condition="assertion.repository == \"${GITHUB_REPO}\"" --issuer-uri="https://token.actions.githubusercontent.com"
+gcloud services enable   container.googleapis.com   compute.googleapis.com   iam.googleapis.com   cloudresourcemanager.googleapis.com   --project="${PROJECT_ID}"
 ```
 
-This:
-
-- Maps GitHub OIDC claims to GCP attributes
-- Restricts usage to a **single GitHub repo**: `jagc108/gcp-infrastructure`
-
-If you want to further restrict (e.g., only `refs/heads/main`), you can change the `attribute-condition`, for example:
-
-```text
-attribute.repository == "jagc108/gcp-infrastructure" &&
-attribute.ref == "refs/heads/main"
-```
+In sandbox, there is no Shared VPC, so you don’t need cross-project IAM or host/service separation.
 
 ---
 
-## 7. Allow the pool to impersonate the Terraform SA
+## 4. IAM for Terraform SA – Corporate / Shared VPC mode
 
-Now bind the **pool identities** to the TF SA with `roles/iam.workloadIdentityUser`.
+In **corporate mode**, there are at least two projects:
 
-1. Get the **pool full name**:
+- `HOST_PROJECT_ID` → Shared VPC host (VPC, subnets, NAT, router)
+- `SERVICE_PROJECT_ID` → GKE cluster running in a different project
 
-   ```bash
-   WIP_POOL_FULL_NAME=$(gcloud iam workload-identity-pools describe "${WIP_POOL_ID}" --project="${INFRA_PROJECT_ID}" --location="global" --format="value(name)")
+Terraform must:
 
-   echo "${WIP_POOL_FULL_NAME}"
-   # e.g. projects/123456789012/locations/global/workloadIdentityPools/github-pool
-   ```
+- Create and manage network/NAT in the **host project**.
+- Attach the **service project** to the Shared VPC.
+- Create and manage GKE cluster in the **service project**.
+- Grant IAM to GKE service agents in the **host** project so GKE can use the Shared VPC.
 
-2. Grant the binding:
-
-   ```bash
-   gcloud iam service-accounts add-iam-policy-binding "${TF_SA_EMAIL}" --project="${INFRA_PROJECT_ID}" --role="roles/iam.workloadIdentityUser" --member="principalSet://iam.googleapis.com/${WIP_POOL_FULL_NAME}/attribute.repository/${GITHUB_REPO}"
-   ```
-
-This allows **any GitHub Actions job** from that repo (and matching the provider condition) to impersonate the TF SA.
-
----
-
-## 8. Values to use in GitHub Actions
-
-You’ll need two important values in your workflow:
-
-1. **Terraform SA email** → `TF_SA_EMAIL`, e.g.:
-
-   ```text
-   github-tf-prod@my-host-project.iam.gserviceaccount.com
-   ```
-
-2. **Workload Identity Provider resource name**, e.g.:
-
-   ```text
-   projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-actions-prod
-   ```
-
-Get it with:
+### 4.1. IAM roles for TF SA on HOST project
 
 ```bash
-gcloud iam workload-identity-pools providers describe "${WIP_PROVIDER_ID}" --project="${INFRA_PROJECT_ID}" --location="global" --workload-identity-pool="${WIP_POOL_ID}" --format="value(name)"
+# Host project: networking + IAM + APIs + let GKE use the network
+gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/compute.networkAdmin"
+
+gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/compute.securityAdmin"
+
+gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/serviceusage.serviceUsageAdmin"
+
+gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/resourcemanager.projectIamAdmin"
+
+# Optional/depending on org policies: allow managing IAM for networking
+gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/iam.securityAdmin"
+
+# Some GKE operations on Shared VPC rely on container roles in host
+gcloud projects add-iam-policy-binding "${HOST_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/container.admin"
 ```
 
-Example:
+> Nota: en el host project, el TF SA normalmente **no necesita** `iam.serviceAccountUser`,  
+> porque las SAs que va a “actuar como” (GKE node SAs) viven en el service project.
+
+### 4.2. IAM roles for TF SA on SERVICE project
+
+```bash
+# Service project: GKE clusters, node SAs, IAM, APIs
+gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/container.admin"
+
+gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/compute.networkAdmin"
+
+gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/iam.serviceAccountAdmin"
+
+# ➕ IMPORTANT: allow the TF SA to "act as" the GKE service accounts it creates in the service project
+gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/iam.serviceAccountUser"
+
+gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/serviceusage.serviceUsageAdmin"
+
+gcloud projects add-iam-policy-binding "${SERVICE_PROJECT_ID}"   --member="serviceAccount:${TF_SA_EMAIL}"   --role="roles/resourcemanager.projectIamAdmin"
+```
+
+Again, `roles/iam.serviceAccountUser` is what prevents:
 
 ```text
-projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-actions-prod
+The user does not have access to service account "tf-gke-...". Ask a project owner to grant you the iam.serviceAccountUser role...
 ```
 
-In GitHub **Environment `prod`** define:
+### 4.3. Enable APIs in host and service projects
 
-- `GCP_TF_SERVICE_ACCOUNT` → `github-tf-prod@my-host-project.iam.gserviceaccount.com`
-- `GCP_WIF_PROVIDER` → `projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-actions-prod`
-- And other vars like:
-  - `HOST_PROJECT_ID_PROD`
-  - `SERVICE_PROJECT_ID_PROD`
-  - `REGION_PROD`
+```bash
+gcloud services enable   container.googleapis.com   compute.googleapis.com   iam.googleapis.com   cloudresourcemanager.googleapis.com   --project="${HOST_PROJECT_ID}"
+
+gcloud services enable   container.googleapis.com   compute.googleapis.com   iam.googleapis.com   cloudresourcemanager.googleapis.com   --project="${SERVICE_PROJECT_ID}"
+```
+
+Con esto, Terraform puede aprovisionar:
+
+- La Shared VPC en el host project.
+- El GKE cluster en el service project.
+- Los IAM necesarios para que el **GKE service agent** del service project use la red del host.
+- Las SAs de GKE y los bindings que el módulo necesita.
 
 ---
 
-## 9. Terraform plan workflow (GitHub Actions)
+## 5. WIF – Common for both sandbox and corporate
 
-Example workflow file: `.github/workflows/terraform-plan-prod.yml`
+The WIF setup is **identical** regardless of deployment mode.  
+The only difference is which `INFRA_PROJECT_ID` you choose (often the same as sandbox project, or a dedicated “infra” project in corporate).
 
-```yaml
-name: Terraform plan - Prod
+### 5.1. Enable APIs for WIF in infra project
 
-on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "environments/prod/**"
+```bash
+gcloud config set project "${INFRA_PROJECT_ID}"
 
-env:
-  TF_INPUT: "false"
-
-permissions:
-  id-token: write        # required for OIDC / WIF
-  contents: read
-  pull-requests: write
-
-jobs:
-  plan:
-    environment: prod
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: ./environments/prod
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud (WIF)
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_TF_SERVICE_ACCOUNT }}
-          create_credentials_file: true
-          export_environment_variables: true
-
-      - name: Terraform - Setup
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.13.5
-
-      - name: Terraform - Format and style
-        id: fmt
-        run: terraform fmt -check -diff -recursive
-        continue-on-error: true
-
-      - name: Terraform - Init
-        id: init
-        run: terraform init
-
-      - name: Terraform - Validate
-        id: validate
-        run: |
-          terraform validate
-          echo "::set-output name=stdout::$(terraform validate -no-color)"
-
-      - name: Terraform - Plan
-        id: plan
-        run: |
-          terraform plan -out=plan.tmp
-          terraform show -no-color plan.tmp >${GITHUB_WORKSPACE}/plan.out
-
-      - name: Terraform - Show Plan in PR
-        uses: actions/github-script@v8
-        if: github.event_name == 'pull_request'
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const run_url = process.env.GITHUB_SERVER_URL + '/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID
-            const run_link = '<a href="' + run_url + '">Actions</a>.'
-            const fs = require('fs')
-            const plan_file = fs.readFileSync('plan.out', 'utf8')
-            const plan = plan_file.length > 65000 ? plan_file.toString().substring(0, 65000) + " ..." : plan_file
-            const truncated_message = plan_file.length > 65000 ? "Output is too long and was truncated. You can read full Plan in " + run_link + "<br /><br />" : ""
-            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
-            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
-            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
-
-            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
-
-            <details><summary>Show Plan</summary>
-
-            \`\`\`
-
-            ${plan}
-            \`\`\`
-
-            </details>
-            ${truncated_message}
-
-            *Pusher: @${{ github.actor }}, Workflow: \`${{ github.workflow }}\`*`;
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: output
-            })
+gcloud services enable   iam.googleapis.com   iamcredentials.googleapis.com   sts.googleapis.com   cloudresourcemanager.googleapis.com
 ```
+
+### 5.2. Create Workload Identity Pool
+
+```bash
+gcloud iam workload-identity-pools create "${WIP_POOL_ID}"   --project="${INFRA_PROJECT_ID}"   --location="global"   --display-name="${WIP_POOL_DISPLAY_NAME}"
+```
+
+Get its full name:
+
+```bash
+WIP_POOL_FULL_NAME=$(gcloud iam workload-identity-pools describe "${WIP_POOL_ID}"   --project="${INFRA_PROJECT_ID}"   --location="global"   --format="value(name)")
+
+echo "${WIP_POOL_FULL_NAME}"
+# e.g. projects/123456789012/locations/global/workloadIdentityPools/github-pool
+```
+
+### 5.3. Create Workload Identity Provider (GitHub OIDC)
+
+```bash
+gcloud iam workload-identity-pools providers create-oidc "${WIP_PROVIDER_ID}"   --project="${INFRA_PROJECT_ID}"   --location="global"   --workload-identity-pool="${WIP_POOL_ID}"   --display-name="${WIP_PROVIDER_DISPLAY_NAME}"   --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref"   --attribute-condition="assertion.repository == \"${GITHUB_REPO}\""   --issuer-uri="https://token.actions.githubusercontent.com"
+```
+
+Get the provider name (for GitHub Actions):
+
+```bash
+gcloud iam workload-identity-pools providers describe "${WIP_PROVIDER_ID}"   --project="${INFRA_PROJECT_ID}"   --location="global"   --workload-identity-pool="${WIP_POOL_ID}"   --format="value(name)"
+# e.g. projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-actions
+```
+
+### 5.4. Allow pool identities to impersonate the TF SA
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding "${TF_SA_EMAIL}"   --project="${INFRA_PROJECT_ID}"   --role="roles/iam.workloadIdentityUser"   --member="principalSet://iam.googleapis.com/${WIP_POOL_FULL_NAME}/attribute.repository/${GITHUB_REPO}"
+```
+
+Now any GitHub Actions job from that repo (matching the provider condition) can impersonate the TF SA.
 
 ---
 
-## 10. Link from the main README
+## 6. GitHub Actions configuration
 
-In your main `README.md` (in the repo root), add a link to this document, for example under the **CI/CD – GitHub Actions (Terraform Plan)** section:
+You need two key values from the previous steps:
 
-```markdown
-For a detailed, step‑by‑step guide on how to configure the Terraform Service Account and Workload Identity Federation for this workflow, see [README-ci-wif.md](README-ci-wif.md).
-```
+- **Terraform SA email** (from step 2.2):
 
-Name this file `README-ci-wif.md` and place it in the repo root so the relative link works as written above.
+  ```text
+  github-tf-prod@INFRA_PROJECT_ID.iam.gserviceaccount.com
+  ```
+
+- **Workload Identity Provider resource name** (from step 5.3), e.g.:
+
+  ```text
+  projects/123456789012/locations/global/workloadIdentityPools/github-pool/providers/github-actions
+  ```
+
+In GitHub (Settings → Environments → `prod` / `test`), define:
+
+- `GCP_TF_SERVICE_ACCOUNT` → TF SA email  
+- `GCP_WIF_PROVIDER` → full WIF provider name  
+- `HOST_PROJECT_ID` / `SERVICE_PROJECT_ID` / `REGION` (for test workflows)  
+- `HOST_PROJECT_ID_PROD` / `SERVICE_PROJECT_ID_PROD` / `REGION_PROD` (for prod plan workflow)
+
+---
+
+## 7. Terraform workflows overview
+
+This repo includes several workflows that rely on the SA + WIF config described above:
+
+### 7.1. Terraform Plan – Prod
+
+- Path: `environments/prod/`
+- Trigger: `pull_request` to `main` touching `environments/prod/**`.
+- Auth: `google-github-actions/auth@v2` with WIF.
+- Steps:
+  - `terraform fmt -check`
+  - `terraform init`
+  - `terraform validate`
+  - `terraform plan`
+  - Post plan output as a PR comment.
+
+### 7.2. Terraform Apply – Test
+
+- Path: `terraform/env/test/`
+- Trigger: `workflow_dispatch` + `push` to `main` touching `terraform/env/test/**`.
+- Auth: WIF.
+- Runs `terraform apply -auto-approve` using vars from environment (`HOST_PROJECT_ID`, `SERVICE_PROJECT_ID`, `REGION`).
+
+### 7.3. Terraform Destroy – Plan (Test)
+
+- Path: `terraform/env/test/`
+- Trigger: `workflow_dispatch`.
+- Auth: WIF.
+- Runs `terraform plan -destroy` (no actual deletion), to review the destruction.
+
+### 7.4. Terraform Destroy – Run (Test)
+
+- Path: `terraform/env/test/`
+- Trigger: `workflow_dispatch`.
+- Auth: WIF.
+- Runs `terraform destroy -auto-approve` to fully tear down the test stack.
+
+> ⚠️ For **prod**, usually you:
+> - Keep `gke_deletion_protection = true` by default.
+> - Use `plan` only in CI, and run `apply`/`destroy` manually or with extra approvals.
+
+---
+
+## 8. Recap: what changes between sandbox and corporate?
+
+- **Sandbox / single-project**
+  - Terraform uses a **single project** for everything (host + service).
+  - All IAM roles for the TF SA are granted in **that one project**  
+    (including `roles/iam.serviceAccountUser`).
+  - No Shared VPC resources or cross-project IAM needed.
+  - Simpler, ideal for personal labs.
+
+- **Corporate / Shared VPC**
+  - Terraform uses **two projects**: host (network) + service (GKE).
+  - TF SA gets roles in **both** host and service projects.
+  - `roles/iam.serviceAccountUser` is required **at least in the service project**  
+    so the TF SA can “act as” the GKE SAs it creates.
+  - Shared VPC host/service bindings and IAM for GKE service agents are created.
+  - Requires a **Google Cloud Organization** and org-level governance.
+
+Once your SA + WIF + IAM configuration matches your chosen mode, the Terraform workflows in this repo should run without 403 “permission denied” errors and you can focus on the infrastructure itself.

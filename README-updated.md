@@ -1,4 +1,4 @@
-# GCP Shared VPC + GKE
+# GCP Shared VPC + GKE (Prod/Test)
 
 Terraform configuration to provision:
 
@@ -18,7 +18,8 @@ Terraform configuration to provision:
 
 Repo layout (simplified):
 
-- `terraform/env/test/` → test environment (Shared VPC + GKE)
+- `environments/prod/` → prod infra (Shared VPC + GKE)
+- `terraform/env/test/` → test environment (same stack adapted to test)
 - `.github/workflows/` → CI/CD workflows (plan/apply/destroy)
 - `README-ci-wif.md` → detailed guide for SA + WIF + GitHub Actions auth
 
@@ -29,7 +30,7 @@ Repo layout (simplified):
 From the repo root:
 
 ```bash
-cd terraform/env/test
+cd environments/prod
 
 # Set required variables (example)
 export TF_VAR_host_project_id="my-host-project"
@@ -262,7 +263,7 @@ The detailed, step-by-step setup of the **Terraform Service Account** and **Work
 
 **File (example):**
 
-- `.github/workflows/tfplan.yml` (not shown here, but described previously)
+- `.github/workflows/terraform-plan-prod.yml` (not shown here, but described previously)
 
 **Purpose:**
 
